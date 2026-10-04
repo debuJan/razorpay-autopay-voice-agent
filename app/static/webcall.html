@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asha web call (demo)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+  select, button { font-size: 1rem; padding: .5rem .8rem; }
+  #log { border: 1px solid #ccc; border-radius: 8px; padding: .8rem; min-height: 160px; white-space: pre-wrap; }
+  .a { color: #0b5; } .u { color: #06c; } .s { color: #888; }
+  pre { background: #f6f6f6; padding: .8rem; border-radius: 8px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Asha web call</h1>
+<p>Demo only. Fictional customer data. Uses your microphone.</p>
+<p>
+  <select id="cust"></select>
+  <button id="start">Start call</button>
+  <button id="end" disabled>End call</button>
+</p>
+<p id="status" class="s">Idle</p>
+<div id="log"></div>
+<h3>Call trace</h3>
+<pre id="trace">(appears after the call ends)</pre>
+
+<script type="module">
+import Vapi from "https://esm.sh/@vapi-ai/web@2.7.1";
+
+const $ = (id) => document.getElementById(id);
+const log = (text, cls = "s") => {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text; $("log").appendChild(d);
+};
+let vapi = null, internalCallId = null;
+
+const customers = await (await fetch("/customers")).json();
+$("cust").innerHTML = customers
+  .map(c => `<option value="${c.customer_id}">${c.customer_id} - ${c.failure_reason}</option>`)
+  .join("");
+
+$("start").onclick = async () => {
+  $("start").disabled = true; $("log").textContent = ""; $("trace").textContent = "";
+  $("status").textContent = "Creating call record...";
+  const res = await fetch("/calls/start-web", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ customer_id: $("cust").value }),
+  });
+  if (!res.ok) {
+    $("status").textContent = "Error: " + ((await res.json()).detail || res.status);
+    $("start").disabled = false; return;
+  }
+  const cfg = await res.json();
+  internalCallId = cfg.call_id;
+
+  vapi = new Vapi(cfg.public_key);
+  vapi.on("call-start", () => { $("status").textContent = "Connected: " + internalCallId; $("end").disabled = false; });
+  vapi.on("call-end", async () => {
+    $("status").textContent = "Call ended"; $("end").disabled = true; $("start").disabled = false;
+    setTimeout(async () => {   // give the end-of-call webhook a moment
+      const t = await fetch(`/calls/${internalCallId}/trace`);
+      $("trace").textContent = JSON.stringify(await t.json(), null, 2);
+    }, 3000);
+  });
+  vapi.on("error", (e) => { log("Error: " + JSON.stringify(e)); $("start").disabled = false; });
+  vapi.on("message", (m) => {
+    if (m.type === "transcript" && m.transcriptType === "final")
+      log((m.role === "assistant" ? "Asha: " : "You: ") + m.transcript, m.role === "assistant" ? "a" : "u");
+  });
+
+  $("status").textContent = "Starting...";
+  const call = await vapi.start(cfg.assistant_id, cfg.assistant_overrides);
+  if (call && call.id) {
+    await fetch(`/calls/${internalCallId}/attach`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_call_id: call.id }),
+    });
+  } else {
+    log("Could not read the Vapi call id; falling back to metadata lookup.");
+  }
+};
+$("end").onclick = () => vapi && vapi.stop();
+</script>
+</body>
+</html>
